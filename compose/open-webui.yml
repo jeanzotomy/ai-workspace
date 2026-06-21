@@ -1,0 +1,68 @@
+# compose/open-webui.yml — Open WebUI v0.9.6
+# Interface de chat multi-modèles. Backend = Dify (API OpenAI-compatible).
+# SSO OIDC natif via Authentik. Port interne 8080.
+
+services:
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.9.6
+    container_name: open-webui
+    restart: unless-stopped
+    environment:
+      # ── Backend LLM (Dify exposé comme endpoint OpenAI-compatible) ──────────
+      # dify-nginx est le conteneur frontend Dify sur le réseau aiws
+      OPENAI_API_BASE_URL: "http://dify-nginx/v1"
+      OPENAI_API_KEY: ${DIFY_API_KEY}
+
+      # ── SSO OIDC via Authentik ───────────────────────────────────────────────
+      ENABLE_OAUTH_SIGNUP: "true"
+      OAUTH_MERGE_ACCOUNTS_BY_EMAIL: "true"
+      # Provider OIDC Authentik — l'application OIDC doit être configurée dans Authentik
+      OPENID_PROVIDER_URL: "https://auth.${DOMAIN}/application/o/open-webui/.well-known/openid-configuration"
+      OAUTH_CLIENT_ID: ${OPENWEBUI_OIDC_CLIENT_ID}
+      OAUTH_CLIENT_SECRET: ${OPENWEBUI_OIDC_CLIENT_SECRET}
+      OAUTH_SCOPES: "openid email profile"
+      OAUTH_PROVIDER_NAME: "Authentik"
+      # URL de callback — doit correspondre à la configuration du provider Authentik
+      WEBUI_URL: "https://chat.${DOMAIN}"
+
+      # ── Sécurité ─────────────────────────────────────────────────────────────
+      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY}
+      # Désactiver l'inscription locale si OIDC est le seul vecteur d'auth
+      ENABLE_SIGNUP: ${OPENWEBUI_ENABLE_SIGNUP:-false}
+      DEFAULT_USER_ROLE: ${OPENWEBUI_DEFAULT_USER_ROLE:-user}
+
+      # ── Observabilité LLM (Langfuse via OpenTelemetry) ───────────────────────
+      ENABLE_OPENTELEMETRY: ${OPENWEBUI_ENABLE_OTEL:-false}
+      OPENTELEMETRY_ENDPOINT: "http://langfuse-web:3000/api/public/otel"
+      OPENTELEMETRY_API_KEY: ${LANGFUSE_PUBLIC_KEY:-""}
+
+      TZ: ${TZ:-UTC}
+    volumes:
+      - open_webui_data:/app/backend/data
+    depends_on:
+      - authentik-server
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.open-webui.rule=Host(`chat.${DOMAIN}`)"
+      - "traefik.http.routers.open-webui.entrypoints=websecure"
+      - "traefik.http.routers.open-webui.tls.certresolver=letsencrypt"
+      - "traefik.http.services.open-webui.loadbalancer.server.port=8080"
+      # Open WebUI gère son propre OIDC — pas de forwardAuth Traefik
+      - "traefik.http.routers.open-webui.middlewares=security-headers@file,compress@file"
+    networks:
+      - aiws
+
+networks:
+  aiws:
+    external: true
+
+volumes:
+  open_webui_data:
+    external: true

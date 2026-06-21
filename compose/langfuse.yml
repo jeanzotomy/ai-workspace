@@ -1,0 +1,178 @@
+# compose/langfuse.yml — Langfuse v3 (observabilité LLM)
+# Source officielle : https://github.com/langfuse/langfuse/blob/main/docker-compose.yml
+# Tags épinglés : langfuse/langfuse:3 + langfuse/langfuse-worker:3 (confirmé 2026-06-21)
+# Adapté pour :
+#   - Réseau aiws (external, déclaré dans docker-compose.yml racine)
+#   - Postgres partagé (base "langfuse", user dédié)
+#   - ClickHouse partagé (service "clickhouse" dans compose/infra.yml)
+#   - Redis partagé (DB 4)
+#   - MinIO partagé (bucket "langfuse") pour events, media, batch exports
+#   - SSO OIDC via Authentik (AUTH_CUSTOM_*)
+#   - Label Traefik → observe.${DOMAIN}:3000
+#   - NEXTAUTH_URL = https://observe.${DOMAIN}
+#   - Zéro valeur en dur
+#
+# Services EXCLUS : postgres, redis, clickhouse, minio (dans compose/infra.yml)
+#
+# IMPORTANT ClickHouse : Langfuse v3 requiert ClickHouse >= 23.x.
+# Le service "clickhouse" de infra.yml doit utiliser clickhouse/clickhouse-server:24-alpine ou supérieur.
+# IMPORTANT Postgres : Langfuse supporte Postgres 12+. Le postgres partagé (16-alpine) est compatible.
+
+networks:
+  aiws:
+    external: true
+
+# Ancre YAML — variables communes langfuse-web et langfuse-worker
+x-langfuse-common-env: &langfuse-common-env
+
+  # --- Authentification / secrets ---
+  NEXTAUTH_URL: "https://observe.${DOMAIN}"
+  NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET}"
+  SALT: "${LANGFUSE_SALT}"
+  ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY}"
+
+  # --- Base de données — postgres partagé, base "langfuse" ---
+  DATABASE_URL: "postgresql://${LANGFUSE_DB_USER}:${LANGFUSE_DB_PASSWORD}@postgres:5432/langfuse"
+
+  # --- ClickHouse partagé ---
+  CLICKHOUSE_URL: "http://clickhouse:8123"
+  CLICKHOUSE_MIGRATION_URL: "clickhouse://clickhouse:9000"
+  CLICKHOUSE_USER: "${CLICKHOUSE_USER:-langfuse}"
+  CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+  # --- Redis partagé — DB 4 ---
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_AUTH: "${REDIS_PASSWORD}"
+  REDIS_TLS_ENABLED: "false"
+  LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: "false"
+
+  # --- MinIO partagé — stockage S3-compat ---
+  # Events (traces Langfuse)
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "${LANGFUSE_S3_BUCKET:-langfuse}"
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: "us-east-1"
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://minio:9000"
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+
+  # Media (images, fichiers joints aux traces)
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: "${LANGFUSE_S3_BUCKET:-langfuse}"
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: "us-east-1"
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+  # URL publique pour téléchargement media : doit être accessible depuis le navigateur
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "https://minio.${DOMAIN}"
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+
+  # Batch exports (activé optionnellement)
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "${LANGFUSE_S3_BATCH_EXPORT_ENABLED:-false}"
+  LANGFUSE_S3_BATCH_EXPORT_BUCKET: "${LANGFUSE_S3_BUCKET:-langfuse}"
+  LANGFUSE_S3_BATCH_EXPORT_REGION: "us-east-1"
+  LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+  LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+  LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: "http://minio:9000"
+  LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_BATCH_EXPORT_PREFIX: "exports/"
+
+  # --- SSO OIDC via Authentik ---
+  # Créer une application OAuth2/OIDC dans Authentik avec redirect URI :
+  # https://observe.${DOMAIN}/api/auth/callback/custom
+  AUTH_CUSTOM_CLIENT_ID: "${LANGFUSE_OIDC_CLIENT_ID}"
+  AUTH_CUSTOM_CLIENT_SECRET: "${LANGFUSE_OIDC_CLIENT_SECRET}"
+  AUTH_CUSTOM_ISSUER: "https://auth.${DOMAIN}/application/o/${LANGFUSE_OIDC_SLUG}/"
+  AUTH_CUSTOM_NAME: "${LANGFUSE_OIDC_PROVIDER_NAME:-Authentik}"
+  AUTH_CUSTOM_SCOPE: "openid email profile"
+  AUTH_CUSTOM_ALLOW_DANGEROUS_EMAIL_ACCOUNT_LINKING: "${LANGFUSE_OIDC_ALLOW_EMAIL_LINK:-true}"
+
+  # --- Désactiver la création de comptes si SSO seul souhaité ---
+  # AUTH_DISABLE_USERNAME_PASSWORD: "${LANGFUSE_AUTH_DISABLE_PASSWORD:-false}"
+  # AUTH_DISABLE_SIGNUP: "${LANGFUSE_AUTH_DISABLE_SIGNUP:-false}"
+
+  # --- Email SMTP (optionnel — invitations, reset mdp) ---
+  EMAIL_FROM_ADDRESS: "${LANGFUSE_EMAIL_FROM:-}"
+  SMTP_CONNECTION_URL: "${LANGFUSE_SMTP_URL:-}"
+
+  # --- Télémétrie ---
+  TELEMETRY_ENABLED: "${LANGFUSE_TELEMETRY_ENABLED:-false}"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "${LANGFUSE_EXPERIMENTAL_FEATURES:-false}"
+
+
+services:
+
+  # -------------------------------------------------------------------------
+  # langfuse-web — interface Next.js (dashboard, settings, projets)
+  # Accessible à : https://observe.${DOMAIN}
+  # -------------------------------------------------------------------------
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:${LANGFUSE_VERSION:-3}
+    container_name: langfuse-web
+    restart: always
+    networks:
+      - aiws
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *langfuse-common-env
+      # Secrets additionnels web uniquement
+      NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET}"
+      # Init organisation + projet + user admin (bootstrap première installation)
+      LANGFUSE_INIT_ORG_ID: "${LANGFUSE_INIT_ORG_ID:-}"
+      LANGFUSE_INIT_ORG_NAME: "${LANGFUSE_INIT_ORG_NAME:-}"
+      LANGFUSE_INIT_PROJECT_ID: "${LANGFUSE_INIT_PROJECT_ID:-}"
+      LANGFUSE_INIT_PROJECT_NAME: "${LANGFUSE_INIT_PROJECT_NAME:-}"
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}"
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}"
+      LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_INIT_USER_EMAIL:-}"
+      LANGFUSE_INIT_USER_NAME: "${LANGFUSE_INIT_USER_NAME:-}"
+      LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_INIT_USER_PASSWORD:-}"
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "aiws"
+      # Route HTTPS
+      traefik.http.routers.langfuse.rule: "Host(`observe.${DOMAIN}`)"
+      traefik.http.routers.langfuse.entrypoints: "websecure"
+      traefik.http.routers.langfuse.tls: "true"
+      traefik.http.routers.langfuse.tls.certresolver: "letsencrypt"
+      traefik.http.services.langfuse.loadbalancer.server.port: "3000"
+      # Pas de forwardAuth — Langfuse a son propre OIDC + NextAuth
+      # Redirect HTTP → HTTPS
+      traefik.http.routers.langfuse-http.rule: "Host(`observe.${DOMAIN}`)"
+      traefik.http.routers.langfuse-http.entrypoints: "web"
+      traefik.http.routers.langfuse-http.middlewares: "redirect-to-https@file"
+
+  # -------------------------------------------------------------------------
+  # langfuse-worker — traitement asynchrone : ingestion traces, analytics,
+  # évaluations LLM, batch exports, nettoyage
+  # -------------------------------------------------------------------------
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:${LANGFUSE_VERSION:-3}
+    container_name: langfuse-worker
+    restart: always
+    networks:
+      - aiws
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *langfuse-common-env
+      # Worker-only : pas de NEXTAUTH_SECRET
+      LANGFUSE_INGESTION_QUEUE_DELAY_MS: "${LANGFUSE_INGESTION_QUEUE_DELAY_MS:-}"
+      LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: "${LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS:-}"
+    # Pas de labels Traefik — interne uniquement (port 3030 en localhost dans l'upstream)

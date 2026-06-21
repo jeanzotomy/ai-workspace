@@ -1,0 +1,39 @@
+# docker-compose.yml — AI Workspace racine
+# Agrège tous les services via include: + déclare le réseau et les volumes partagés.
+# Ne PAS modifier les noms des services (définis dans ARCHITECTURE.md §3 — immuables).
+
+include:
+  - compose/infra.yml
+  - compose/traefik.yml
+  - compose/authentik.yml
+  - compose/dify.yml
+  - compose/open-webui.yml
+  - compose/langfuse.yml
+  - compose/infisical.yml
+  - compose/comp-ai.yml
+
+networks:
+  # Réseau externe créé à l'amorçage (scripts/bootstrap.sh ou `make up`).
+  # external:true sur TOUS les fichiers (racine + compose/*.yml) pour la cohérence include:.
+  aiws:
+    external: true
+    name: aiws
+
+volumes:
+  # Infra partagée
+  postgres_data:
+  redis_data:
+  minio_data:
+  clickhouse_data:
+  qdrant_data:
+  # Traefik
+  traefik_acme:
+  # Authentik
+  authentik_media:
+  authentik_certs:
+  # Open WebUI
+  open_webui_data:
+  # Infisical
+  infisical_data:
+  # Comp AI
+  comp_ai_data:

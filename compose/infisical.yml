@@ -1,0 +1,83 @@
+# compose/infisical.yml — Infisical (gestionnaire de secrets)
+# ⚠️  IMPORTANT : Infisical publie avec le tag :latest dans leur docker-compose officiel
+# et recommande de le remplacer par un digest SHA256 ou un tag de version spécifique.
+# Tag utilisé : infisical/infisical:latest — REMPLACER par le digest de la release
+# courante (v0.161.3 — 2026-06-19) après `docker pull infisical/infisical:latest`
+# puis `docker inspect infisical/infisical:latest --format='{{.Id}}'`.
+#
+# ⚠️  OIDC / SSO : Le SSO OIDC est réservé à l'édition entreprise Infisical.
+# En Community Edition, l'authentification est native (email + MDP).
+# Le forwardAuth Traefik sert de garde-fou périmétrique (protège l'URL d'accès).
+#
+# Postgres partagé (db infisical). Redis partagé. Port interne 8080.
+
+services:
+
+  infisical:
+    # PIN CE TAG à un digest spécifique en production (voir commentaire ci-dessus)
+    image: infisical/infisical:latest
+    container_name: infisical
+    restart: unless-stopped
+    environment:
+      # ── Base de données ──────────────────────────────────────────────────────
+      # Infisical attend DB_CONNECTION_URI (pas DATABASE_URL)
+      DB_CONNECTION_URI: "postgresql://${INFISICAL_DB_USER:-infisical}:${INFISICAL_DB_PASSWORD}@postgres:5432/${INFISICAL_DB_NAME:-infisical}"
+
+      # ── Redis ────────────────────────────────────────────────────────────────
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379"
+
+      # ── Secrets & chiffrement ────────────────────────────────────────────────
+      # ENCRYPTION_KEY : 16 octets hex (32 caractères) — généré par bootstrap.sh
+      ENCRYPTION_KEY: ${INFISICAL_ENCRYPTION_KEY}
+      # AUTH_SECRET : JWT secret (32+ caractères aléatoires)
+      AUTH_SECRET: ${INFISICAL_AUTH_SECRET}
+
+      # ── URLs ─────────────────────────────────────────────────────────────────
+      SITE_URL: "https://secrets.${DOMAIN}"
+      FRONTEND_URL: "https://secrets.${DOMAIN}"
+
+      # ── Email (optionnel — invitations utilisateurs) ─────────────────────────
+      SMTP_HOST: ${SMTP_HOST:-""}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_TLS:-true}
+      SMTP_USERNAME: ${SMTP_USER:-""}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-""}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM:-"noreply@${DOMAIN}"}
+      SMTP_FROM_NAME: "AI Workspace Secrets"
+
+      # ── Télémétrie (désactiver pour self-hosted privé) ───────────────────────
+      TELEMETRY_ENABLED: "false"
+
+      NODE_ENV: production
+      TZ: ${TZ:-UTC}
+    volumes:
+      - infisical_data:/app/.data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.infisical.rule=Host(`secrets.${DOMAIN}`)"
+      - "traefik.http.routers.infisical.entrypoints=websecure"
+      - "traefik.http.routers.infisical.tls.certresolver=letsencrypt"
+      - "traefik.http.services.infisical.loadbalancer.server.port=8080"
+      # forwardAuth Authentik comme garde-fou périmétrique (SSO natif = édition entreprise)
+      - "traefik.http.routers.infisical.middlewares=authentik-forwardauth@file,security-headers@file,compress@file"
+    networks:
+      - aiws
+
+networks:
+  aiws:
+    external: true
+
+volumes:
+  infisical_data:
+    external: true

@@ -1,0 +1,105 @@
+# compose/authentik.yml — Authentik 2026.5.3 (SSO IdP OIDC)
+# Server (API + UI + outpost embed) + Worker (tâches asynchrones, provisioning)
+# Postgres et Redis partagés (réseau aiws). Blueprints dans config/authentik/.
+
+services:
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2026.5.3
+    container_name: authentik-server
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASSWORD}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB_NAME:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+      # Clé secrète principale (32+ caractères aléatoires — générer avec bootstrap.sh)
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      # Bootstrap admin (UNIQUEMENT au premier démarrage — changer le mot de passe ensuite)
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD}
+      # URL publique de l'IdP
+      AUTHENTIK_HOST: "https://auth.${DOMAIN}"
+      AUTHENTIK_HOST_BROWSER: "https://auth.${DOMAIN}"
+      # Email (optionnel — pour invitations et reset de mot de passe)
+      AUTHENTIK_EMAIL__HOST: ${SMTP_HOST:-""}
+      AUTHENTIK_EMAIL__PORT: ${SMTP_PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${SMTP_USER:-""}
+      AUTHENTIK_EMAIL__PASSWORD: ${SMTP_PASSWORD:-""}
+      AUTHENTIK_EMAIL__USE_TLS: ${SMTP_TLS:-true}
+      AUTHENTIK_EMAIL__FROM: ${SMTP_FROM:-"noreply@${DOMAIN}"}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - authentik_media:/media
+      - authentik_certs:/certs
+      # Blueprints pour provisionner automatiquement les providers OIDC (devops-B)
+      - ./config/authentik/blueprints:/blueprints/custom:ro
+    healthcheck:
+      test: ["CMD-SHELL", "ak healthcheck || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.authentik.rule=Host(`auth.${DOMAIN}`)"
+      - "traefik.http.routers.authentik.entrypoints=websecure"
+      - "traefik.http.routers.authentik.tls.certresolver=letsencrypt"
+      - "traefik.http.services.authentik.loadbalancer.server.port=9000"
+      - "traefik.http.routers.authentik.middlewares=security-headers@file,compress@file"
+      # Endpoint outpost forwardAuth — doit rester accessible sans auth
+      - "traefik.http.routers.authentik-outpost.rule=Host(`auth.${DOMAIN}`) && PathPrefix(`/outpost.goauthentik.io/`)"
+      - "traefik.http.routers.authentik-outpost.entrypoints=websecure"
+      - "traefik.http.routers.authentik-outpost.tls.certresolver=letsencrypt"
+      - "traefik.http.services.authentik-outpost.loadbalancer.server.port=9000"
+    networks:
+      - aiws
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2026.5.3
+    container_name: authentik-worker
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASSWORD}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB_NAME:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_HOST: "https://auth.${DOMAIN}"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - authentik_media:/media
+      - authentik_certs:/certs
+      - ./config/authentik/blueprints:/blueprints/custom:ro
+      # Worker a besoin du socket Docker pour provisionner les outposts intégrés
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      authentik-server:
+        condition: service_healthy
+    networks:
+      - aiws
+
+networks:
+  aiws:
+    external: true
+
+volumes:
+  authentik_media:
+    external: true
+  authentik_certs:
+    external: true

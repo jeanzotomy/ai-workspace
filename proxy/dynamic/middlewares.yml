@@ -1,0 +1,70 @@
+# proxy/dynamic/middlewares.yml — Middlewares Traefik (provider file, hot-reload)
+# Référencé depuis les labels des containers comme : middlewares=<nom>@file
+# AUCUNE valeur en dur — les URLs utilisent des variables résolues par Traefik via Docker provider.
+
+http:
+  middlewares:
+
+    # ─── ForwardAuth Authentik ────────────────────────────────────────────────
+    # Protège les UIs sans OIDC natif (Traefik dashboard, Dify console, Infisical)
+    # L'outpost Authentik doit être déployé (embed dans authentik-server en mode standalone).
+    authentik-forwardauth:
+      forwardAuth:
+        # authentik-server est le conteneur IdP sur le réseau aiws
+        address: "http://authentik-server:9000/outpost.goauthentik.io/auth/traefik"
+        trustForwardHeader: true
+        authResponseHeaders:
+          - X-authentik-username
+          - X-authentik-groups
+          - X-authentik-email
+          - X-authentik-name
+          - X-authentik-uid
+          - X-authentik-jwt
+          - X-authentik-meta-jwks
+          - X-authentik-meta-outpost
+          - X-authentik-meta-provider
+          - X-authentik-meta-app
+          - X-authentik-meta-version
+
+    # ─── En-têtes de sécurité HTTP ───────────────────────────────────────────
+    security-headers:
+      headers:
+        # HSTS — force HTTPS pour 1 an (incluant sous-domaines)
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        # Clickjacking
+        frameDeny: false        # false car Authentik utilise des iframes légitimes
+        customFrameOptionsValue: "SAMEORIGIN"
+        # XSS Protection
+        browserXssFilter: true
+        contentTypeNosniff: true
+        # Referrer policy
+        referrerPolicy: "strict-origin-when-cross-origin"
+        # Permissions policy
+        permissionsPolicy: "camera=(), microphone=(), geolocation=()"
+        # CSP basique — à affiner selon les besoins de chaque app
+        contentSecurityPolicy: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'"
+        # Supprimer la bannière Traefik
+        customResponseHeaders:
+          Server: ""
+          X-Powered-By: ""
+
+    # ─── Compression gzip ────────────────────────────────────────────────────
+    compress:
+      compress:
+        excludedContentTypes:
+          - "text/event-stream"    # SSE ne doit pas être compressé
+
+    # ─── Rate limiting (protection globale) ──────────────────────────────────
+    ratelimit-global:
+      rateLimit:
+        average: 100
+        burst: 50
+        period: 1s
+
+    # ─── Redirect www → apex ──────────────────────────────────────────────────
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true

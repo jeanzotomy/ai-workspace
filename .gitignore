@@ -1,0 +1,34 @@
+# Secrets & env (jamais commités)
+.env
+.env.local
+*.env.local
+config/authentik/.secrets/
+scripts/.generated/
+
+# Volumes & données runtime
+volumes/
+data/
+*.pem
+acme.json
+
+# Logs
+*.log
+logs/
+
+# Vendor (Comp AI — cloné par bootstrap.sh, ne pas commiter)
+vendor/
+
+# Build artifacts Comp AI
+compose/comp-ai-build/
+
+# Traefik ACME (stocké dans volume Docker — ne pas commiter)
+proxy/acme.json
+
+# OS / éditeurs
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Handoffs internes agents (workflow)
+_*-output.md

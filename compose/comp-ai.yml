@@ -1,0 +1,88 @@
+# compose/comp-ai.yml — Comp AI (trycompai/comp) — Conformité SOC2/ISO27001/RGPD
+#
+# ⚠️  LIMITE DOCUMENTÉE : trycompai/comp ne publie PAS d'image Docker pré-construite
+# sur Docker Hub ou ghcr.io (vérifié le 2026-06-21 sur github.com/trycompai/comp).
+# Le repo officiel utilise `build: context: . dockerfile: Dockerfile target: app`
+# (build depuis les sources).
+#
+# STRATÉGIE RETENUE : build depuis un clone Git du repo au moment du bootstrap.
+# Alternative pour les versions futures : surveiller https://github.com/trycompai/comp/pkgs/container
+# et remplacer `build:` par `image:` dès qu'une image publiée est disponible.
+#
+# Prérequis : exécuter `scripts/bootstrap.sh` qui clone le repo dans ./vendor/comp
+#
+# ⚠️  SSO : Comp AI supporte OAuth (via Authentik comme provider OAuth2).
+# Postgres partagé (db compai). Port interne 3000.
+
+services:
+
+  comp-ai:
+    # Build depuis les sources clonées par bootstrap.sh
+    build:
+      context: ./vendor/comp
+      dockerfile: apps/app/Dockerfile
+      target: app
+    image: aiws-comp-ai:latest
+    container_name: comp-ai
+    restart: unless-stopped
+    environment:
+      # ── Base de données (Next.js / Prisma) ──────────────────────────────────
+      DATABASE_URL: "postgresql://${COMPAI_DB_USER:-compai}:${COMPAI_DB_PASSWORD}@postgres:5432/${COMPAI_DB_NAME:-compai}"
+
+      # ── URL publique ──────────────────────────────────────────────────────────
+      NEXTAUTH_URL: "https://compliance.${DOMAIN}"
+      NEXT_PUBLIC_APP_URL: "https://compliance.${DOMAIN}"
+
+      # ── Auth (NextAuth.js / Auth.js) ─────────────────────────────────────────
+      NEXTAUTH_SECRET: ${COMPAI_NEXTAUTH_SECRET}
+
+      # ── OAuth via Authentik ──────────────────────────────────────────────────
+      # Provider OAuth2 configuré dans Authentik (application + provider)
+      AUTH_AUTHENTIK_ID: ${COMPAI_OIDC_CLIENT_ID}
+      AUTH_AUTHENTIK_SECRET: ${COMPAI_OIDC_CLIENT_SECRET}
+      AUTH_AUTHENTIK_ISSUER: "https://auth.${DOMAIN}/application/o/comp-ai/"
+
+      # ── Stockage (optionnel — pour pièces justificatives conformité) ─────────
+      STORAGE_PROVIDER: "s3"
+      STORAGE_ENDPOINT: "http://minio:9000"
+      STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
+      STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      STORAGE_BUCKET: ${COMPAI_STORAGE_BUCKET:-comp-ai-evidence}
+      STORAGE_REGION: ${COMPAI_STORAGE_REGION:-us-east-1}
+
+      # ── Intégration Langfuse (audit trails LLM → conformité) ─────────────────
+      LANGFUSE_HOST: "http://langfuse-web:3000"
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-""}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-""}
+
+      NODE_ENV: production
+      TZ: ${TZ:-UTC}
+    volumes:
+      - comp_ai_data:/app/.data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.comp-ai.rule=Host(`compliance.${DOMAIN}`)"
+      - "traefik.http.routers.comp-ai.entrypoints=websecure"
+      - "traefik.http.routers.comp-ai.tls.certresolver=letsencrypt"
+      - "traefik.http.services.comp-ai.loadbalancer.server.port=3000"
+      # Comp AI gère son propre OAuth — pas de double forwardAuth
+      - "traefik.http.routers.comp-ai.middlewares=security-headers@file,compress@file"
+    networks:
+      - aiws
+
+networks:
+  aiws:
+    external: true
+
+volumes:
+  comp_ai_data:
+    external: true

@@ -1,0 +1,279 @@
+# compose/dify.yml — Dify AI platform
+# Source officielle : https://github.com/langgenius/dify/blob/main/docker/docker-compose.yaml
+# Tag épinglé : langgenius/dify-api:1.14.2 + langgenius/dify-web:1.14.2
+#               langgenius/dify-sandbox:0.2.15 (confirmé 2026-06-21)
+# Adapté pour :
+#   - Réseau aiws (external, déclaré dans docker-compose.yml racine)
+#   - Infra partagée : postgres (base dify), redis (DB 2/3), qdrant, minio
+#   - Labels Traefik sur dify-nginx → dify.${DOMAIN}
+#   - Protection forwardAuth Authentik (Dify CE n'a pas OIDC natif)
+#   - Zéro valeur en dur — tout via ${DIFY_*} / globales
+#
+# Services conservés : dify-api, dify-worker, dify-web, dify-nginx, dify-sandbox, dify-ssrf-proxy
+# Services EXCLUS : postgres, redis, qdrant, minio (dans compose/infra.yml)
+# Plugin daemon : exclu (nécessite host.docker.internal — hors périmètre v1)
+#
+# NOTE : DIFY_STORAGE_TYPE=s3 → MinIO partagé. Si non défini, fallback local (volume dify_storage).
+# NOTE SSO : OIDC = édition Enterprise uniquement. On utilise Traefik forwardAuth comme garde-fou.
+
+networks:
+  aiws:
+    external: true
+
+# ---------------------------------------------------------------------------
+# Bloc de variables d'env partagé entre dify-api et dify-worker (ancre YAML)
+# ---------------------------------------------------------------------------
+x-dify-common-env: &dify-common-env
+  # Runtime
+  DEPLOY_ENV: "PRODUCTION"
+  DEBUG: "false"
+  FLASK_DEBUG: "false"
+  LOG_LEVEL: "${DIFY_LOG_LEVEL:-INFO}"
+  LOG_OUTPUT_FORMAT: "${DIFY_LOG_OUTPUT_FORMAT:-text}"
+  TZ: "${TZ:-UTC}"
+
+  # Base de données — postgres partagé, base dédiée "dify"
+  DB_TYPE: "postgresql"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_USERNAME: "${DIFY_DB_USER}"
+  DB_PASSWORD: "${DIFY_DB_PASSWORD}"
+  DB_DATABASE: "dify"
+  MIGRATION_ENABLED: "true"
+
+  # Redis partagé — DB 2 pour cache, DB 3 pour Celery
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: "${REDIS_PASSWORD}"
+  REDIS_DB: "2"
+  CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD}@redis:6379/3"
+  CELERY_BACKEND: "redis"
+  CELERY_AUTO_SCALE: "false"
+  CELERY_WORKER_AMOUNT: "${DIFY_CELERY_WORKER_AMOUNT:-}"
+
+  # Sécurité
+  SECRET_KEY: "${DIFY_SECRET_KEY}"
+  INIT_PASSWORD: "${DIFY_INIT_PASSWORD}"
+  CODE_EXECUTION_API_KEY: "${DIFY_SANDBOX_API_KEY}"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+  REFRESH_TOKEN_EXPIRE_DAYS: "30"
+  WEB_API_CORS_ALLOW_ORIGINS: "*"
+  CONSOLE_CORS_ALLOW_ORIGINS: "*"
+
+  # Vector store — Qdrant partagé
+  VECTOR_STORE: "qdrant"
+  QDRANT_URL: "http://qdrant:6333"
+  QDRANT_API_KEY: "${DIFY_QDRANT_API_KEY:-}"
+  QDRANT_CLIENT_TIMEOUT: "20"
+  QDRANT_GRPC_ENABLED: "false"
+  QDRANT_REPLICATION_FACTOR: "1"
+
+  # Stockage fichiers — MinIO partagé via S3-compat
+  STORAGE_TYPE: "${DIFY_STORAGE_TYPE:-s3}"
+  S3_ENDPOINT: "http://minio:9000"
+  S3_BUCKET_NAME: "${DIFY_S3_BUCKET:-dify}"
+  S3_ACCESS_KEY: "${MINIO_ROOT_USER}"
+  S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
+  S3_REGION: "us-east-1"
+  S3_ADDRESS_STYLE: "path"
+  S3_USE_AWS_MANAGED_IAM: "false"
+  # Fallback volume local si DIFY_STORAGE_TYPE=local
+  OPENDAL_SCHEME: "fs"
+  OPENDAL_FS_ROOT: "/app/api/storage"
+
+  # Code execution (sandbox interne)
+  CODE_EXECUTION_ENDPOINT: "http://dify-sandbox:8194"
+  CODE_EXECUTION_SSL_VERIFY: "false"
+  CODE_EXECUTION_CONNECT_TIMEOUT: "10"
+  CODE_EXECUTION_READ_TIMEOUT: "60"
+  CODE_EXECUTION_WRITE_TIMEOUT: "10"
+
+  # SSRF proxy (Squid)
+  SSRF_PROXY_HTTP_URL: "http://dify-ssrf-proxy:3128"
+  SSRF_PROXY_HTTPS_URL: "http://dify-ssrf-proxy:3128"
+
+  # URLs publiques — utiliser le domaine configuré
+  CONSOLE_WEB_URL: "https://dify.${DOMAIN}"
+  SERVICE_API_URL: "https://dify.${DOMAIN}"
+  APP_WEB_URL: "https://dify.${DOMAIN}"
+  FILES_URL: "https://dify.${DOMAIN}"
+
+  # Langfuse — tracing LLM (configuré par app dans l'UI Dify)
+  # URL interne pour permettre la configuration sans sortir du réseau
+  LANGFUSE_HOST: "http://langfuse-web:3000"
+
+  # Marketplace plugins
+  MARKETPLACE_ENABLED: "${DIFY_MARKETPLACE_ENABLED:-true}"
+  MARKETPLACE_API_URL: "https://marketplace.dify.ai"
+  FORCE_VERIFYING_SIGNATURE: "true"
+
+  # Workers
+  SERVER_WORKER_AMOUNT: "${DIFY_SERVER_WORKER_AMOUNT:-1}"
+  SERVER_WORKER_CLASS: "gevent"
+  SERVER_WORKER_CONNECTIONS: "10"
+  GUNICORN_TIMEOUT: "360"
+
+  # ETL
+  ETL_TYPE: "dify"
+
+  # Telemetry désactivée par défaut (données sensibles)
+  SCARF_NO_ANALYTICS: "${DIFY_SCARF_NO_ANALYTICS:-true}"
+
+  # Limites uploads
+  UPLOAD_FILE_SIZE_LIMIT: "${DIFY_UPLOAD_FILE_SIZE_LIMIT:-15}"
+  UPLOAD_FILE_BATCH_LIMIT: "${DIFY_UPLOAD_FILE_BATCH_LIMIT:-5}"
+
+
+services:
+
+  # -------------------------------------------------------------------------
+  # dify-api — serveur REST API Flask/Gunicorn + migrations Alembic au boot
+  # -------------------------------------------------------------------------
+  dify-api:
+    image: langgenius/dify-api:${DIFY_VERSION:-1.14.2}
+    container_name: dify-api
+    restart: always
+    networks:
+      - aiws
+    depends_on:
+      - dify-sandbox
+      - dify-ssrf-proxy
+    volumes:
+      - dify_storage:/app/api/storage
+    environment:
+      <<: *dify-common-env
+      MODE: "api"
+      DIFY_BIND_ADDRESS: "0.0.0.0"
+      DIFY_PORT: "5001"
+
+  # -------------------------------------------------------------------------
+  # dify-worker — tâches Celery : ingestion docs, RAG, embeddings, workflows
+  # -------------------------------------------------------------------------
+  dify-worker:
+    image: langgenius/dify-api:${DIFY_VERSION:-1.14.2}
+    container_name: dify-worker
+    restart: always
+    networks:
+      - aiws
+    depends_on:
+      - dify-sandbox
+      - dify-ssrf-proxy
+    volumes:
+      - dify_storage:/app/api/storage
+    environment:
+      <<: *dify-common-env
+      MODE: "worker"
+
+  # -------------------------------------------------------------------------
+  # dify-web — frontend Next.js (SSR)
+  # -------------------------------------------------------------------------
+  dify-web:
+    image: langgenius/dify-web:${DIFY_VERSION:-1.14.2}
+    container_name: dify-web
+    restart: always
+    networks:
+      - aiws
+    environment:
+      EDITION: "SELF_HOSTED"
+      CONSOLE_API_URL: ""
+      APP_API_URL: ""
+      NEXT_TELEMETRY_DISABLED: "1"
+      PM2_INSTANCES: "${DIFY_WEB_PM2_INSTANCES:-1}"
+      SENTRY_DSN: "${DIFY_WEB_SENTRY_DSN:-}"
+      TZ: "${TZ:-UTC}"
+
+  # -------------------------------------------------------------------------
+  # dify-nginx — consolidation api + web, point d'entrée Traefik
+  # Nginx officiel : nginx:1.27-alpine (image légère, version épinglée)
+  # La conf est générée au boot via template dans l'image Dify officielle
+  # -------------------------------------------------------------------------
+  dify-nginx:
+    image: nginx:1.27-alpine
+    container_name: dify-nginx
+    restart: always
+    networks:
+      - aiws
+    depends_on:
+      - dify-api
+      - dify-web
+    volumes:
+      # Config nginx injectée par le projet (pas de template officiel utilisable sans le dépôt complet)
+      # Créer proxy/nginx/dify.conf.template si personnalisation nécessaire
+      - dify_nginx_conf:/etc/nginx/conf.d:ro
+    environment:
+      NGINX_SERVER_NAME: "_"
+      NGINX_HTTPS_ENABLED: "false"
+      NGINX_KEEPALIVE_TIMEOUT: "65"
+      NGINX_PROXY_READ_TIMEOUT: "3600s"
+      NGINX_PROXY_SEND_TIMEOUT: "3600s"
+      NGINX_WORKER_PROCESSES: "auto"
+      DIFY_API_URL: "http://dify-api:5001"
+      DIFY_WEB_URL: "http://dify-web:3000"
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "aiws"
+      # Route HTTPS
+      traefik.http.routers.dify.rule: "Host(`dify.${DOMAIN}`)"
+      traefik.http.routers.dify.entrypoints: "websecure"
+      traefik.http.routers.dify.tls: "true"
+      traefik.http.routers.dify.tls.certresolver: "letsencrypt"
+      traefik.http.services.dify.loadbalancer.server.port: "80"
+      # forwardAuth Authentik (Dify CE sans OIDC natif)
+      traefik.http.routers.dify.middlewares: "authentik-forward-auth@file"
+      # Redirect HTTP → HTTPS
+      traefik.http.routers.dify-http.rule: "Host(`dify.${DOMAIN}`)"
+      traefik.http.routers.dify-http.entrypoints: "web"
+      traefik.http.routers.dify-http.middlewares: "redirect-to-https@file"
+
+  # -------------------------------------------------------------------------
+  # dify-sandbox — exécution isolée de code (Python / Node)
+  # API Key requise ; proxy HTTP forcé via ssrf-proxy
+  # -------------------------------------------------------------------------
+  dify-sandbox:
+    image: langgenius/dify-sandbox:${DIFY_SANDBOX_VERSION:-0.2.15}
+    container_name: dify-sandbox
+    restart: always
+    networks:
+      - aiws
+    environment:
+      API_KEY: "${DIFY_SANDBOX_API_KEY}"
+      GIN_MODE: "release"
+      WORKER_TIMEOUT: "${DIFY_SANDBOX_WORKER_TIMEOUT:-15}"
+      ENABLE_NETWORK: "${DIFY_SANDBOX_ENABLE_NETWORK:-true}"
+      HTTP_PROXY: "http://dify-ssrf-proxy:3128"
+      HTTPS_PROXY: "http://dify-ssrf-proxy:3128"
+      SANDBOX_PORT: "8194"
+      PIP_MIRROR_URL: "${DIFY_PIP_MIRROR_URL:-}"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - dify_sandbox_deps:/dependencies
+
+  # -------------------------------------------------------------------------
+  # dify-ssrf-proxy — protection SSRF (Squid) : bloque accès réseau interne
+  # depuis les outils HTTP et code exécuté dans le sandbox
+  # -------------------------------------------------------------------------
+  dify-ssrf-proxy:
+    image: ubuntu/squid:latest
+    container_name: dify-ssrf-proxy
+    restart: always
+    networks:
+      - aiws
+    environment:
+      HTTP_PORT: "${DIFY_SSRF_HTTP_PORT:-3128}"
+      COREDUMP_DIR: "/var/spool/squid"
+      REVERSE_PROXY_PORT: "8194"
+      SANDBOX_HOST: "dify-sandbox"
+      # Laisser vide pour bloquer tout le réseau privé (recommandé)
+      ALLOW_PRIVATE_IPS: "${DIFY_SSRF_ALLOW_PRIVATE_IPS:-}"
+      ALLOW_PRIVATE_DOMAINS: "${DIFY_SSRF_ALLOW_PRIVATE_DOMAINS:-}"
+
+
+volumes:
+  # Volume local pour uploads/fichiers si DIFY_STORAGE_TYPE=local
+  # (ignoré si DIFY_STORAGE_TYPE=s3 — les fichiers vont dans MinIO)
+  dify_storage:
+    driver: local
+  dify_nginx_conf:
+    driver: local
+  dify_sandbox_deps:
+    driver: local
