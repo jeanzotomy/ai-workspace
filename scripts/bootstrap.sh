@@ -133,10 +133,22 @@ result = []
 for line in lines:
     if '=<générer>' in line or '=<générer> ' in line:
         varname = line.split('=')[0]
+        # Mots de passe « humains » avec contrainte de longueur applicative.
+        # NB: Dify plafonne INIT_PASSWORD à 30 caractères (max_length=30 dans
+        # controllers/console/init_validate.py) ET exige lettres+chiffres pour le
+        # compte admin (libs/password.py). Un secret hex de 64 chars est REFUSÉ
+        # (422 à /console/api/init) → l'installation initiale devient impossible.
+        # On génère donc un mot de passe alphanumérique de 24 chars, garanti avec
+        # au moins une lettre et un chiffre.
+        if 'INIT_PASSWORD' in varname:
+            import secrets as _secrets, string as _string
+            alphabet = _string.ascii_letters + _string.digits
+            body = ''.join(_secrets.choice(alphabet) for _ in range(22))
+            secret = 'A' + body + '7'  # garantit lettre + chiffre, total 24 chars (<=30)
         # Détecter si on veut 16 ou 32 octets selon le commentaire
         # NB: LANGFUSE_ENCRYPTION_KEY exige 32 octets (64 chars hex), seul
         # INFISICAL_ENCRYPTION_KEY veut 16 octets (32 chars hex).
-        if '16 octets' in line or 'hex 16' in line or 'SALT' in varname or 'INFISICAL_ENCRYPTION_KEY' in varname:
+        elif '16 octets' in line or 'hex 16' in line or 'SALT' in varname or 'INFISICAL_ENCRYPTION_KEY' in varname:
             secret = subprocess.check_output(['openssl', 'rand', '-hex', '16']).decode().strip()
         else:
             secret = subprocess.check_output(['openssl', 'rand', '-hex', '32']).decode().strip()
@@ -155,7 +167,12 @@ PYEOF
         while IFS= read -r line; do
             if echo "${line}" | grep -q '=<générer>'; then
                 varname="$(echo "${line}" | cut -d= -f1)"
-                secret="$(openssl rand -hex 32)"
+                # INIT_PASSWORD : ≤30 chars alphanumériques (cf. branche python ci-dessus)
+                if echo "${varname}" | grep -q 'INIT_PASSWORD'; then
+                    secret="A$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 22)7"
+                else
+                    secret="$(openssl rand -hex 32)"
+                fi
                 echo "${varname}=${secret}"
             else
                 echo "${line}"
