@@ -53,13 +53,14 @@ services:
       - "traefik.http.routers.authentik.rule=Host(`auth.${DOMAIN}`)"
       - "traefik.http.routers.authentik.entrypoints=websecure"
       - "traefik.http.routers.authentik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.authentik.service=authentik"
       - "traefik.http.services.authentik.loadbalancer.server.port=9000"
       - "traefik.http.routers.authentik.middlewares=security-headers@file,compress@file"
       # Endpoint outpost forwardAuth — doit rester accessible sans auth
       - "traefik.http.routers.authentik-outpost.rule=Host(`auth.${DOMAIN}`) && PathPrefix(`/outpost.goauthentik.io/`)"
       - "traefik.http.routers.authentik-outpost.entrypoints=websecure"
       - "traefik.http.routers.authentik-outpost.tls.certresolver=letsencrypt"
-      - "traefik.http.services.authentik-outpost.loadbalancer.server.port=9000"
+      - "traefik.http.routers.authentik-outpost.service=authentik"
     networks:
       - aiws
 
@@ -82,8 +83,10 @@ services:
       - authentik_media:/media
       - authentik_certs:/certs
       - ./config/authentik/blueprints:/blueprints/custom:ro
-      # Worker a besoin du socket Docker pour provisionner les outposts intégrés
-      - /var/run/docker.sock:/var/run/docker.sock
+      # NB : pas de montage de /var/run/docker.sock — on utilise uniquement l'outpost
+      # EMBARQUÉ (forwardAuth), qui ne provisionne aucun conteneur. Le socket ne serait
+      # nécessaire que pour des outposts MANAGÉS (conteneurs séparés). Le retirer évite
+      # un accès root-équivalent à l'hôte si le worker était compromis (cf. audit sécurité).
     depends_on:
       postgres:
         condition: service_healthy

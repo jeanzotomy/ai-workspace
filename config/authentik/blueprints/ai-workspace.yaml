@@ -1,43 +1,37 @@
 # =============================================================================
 # config/authentik/blueprints/ai-workspace.yaml
 # =============================================================================
-# Blueprint Authentik — Providers OIDC/OAuth + Applications pour l'AI Workspace
+# Blueprint Authentik — Providers OIDC/OAuth + Proxy (forwardAuth) + Applications
+# pour l'AI Workspace. Compatible Authentik 2026.5.3.
 #
-# COMMENT APPLIQUER :
-#   Le dossier config/authentik/blueprints/ est monté dans /blueprints/custom/
-#   des conteneurs authentik-server et authentik-worker (voir compose/authentik.yml).
-#   Authentik détecte automatiquement les blueprints dans /blueprints/custom/ au démarrage.
+# MONTAGE :
+#   ./config/authentik/blueprints est monté dans /blueprints/custom/ des conteneurs
+#   authentik-server et authentik-worker (via docker-compose.override.yml — le chemin
+#   dans compose/authentik.yml se résout mal à cause du bug include:).
+#   Authentik découvre et applique automatiquement les blueprints de /blueprints/custom/.
 #
-#   Pour appliquer manuellement :
-#   1. Se connecter à https://auth.${DOMAIN} > Admin Interface
-#   2. Aller dans Customisation > Blueprints
-#   3. Cliquer sur "ai-workspace" puis "Apply"
+# DOMAINE :
+#   Les URLs sont construites depuis la variable d'env AIWS_DOMAIN (passée aux
+#   conteneurs via l'override), défaut "aiws.localhost".
 #
-# APRÈS APPLICATION :
-#   Récupérer les client_id et client_secret générés :
-#   1. Admin > Applications > Providers
-#   2. Pour chaque provider, noter le Client ID et Client Secret
-#   3. Reporter dans .env :
-#      OPENWEBUI_OIDC_CLIENT_ID=...
-#      OPENWEBUI_OIDC_CLIENT_SECRET=...
-#      LANGFUSE_OIDC_CLIENT_ID=...
-#      LANGFUSE_OIDC_CLIENT_SECRET=...
-#      COMPAI_OIDC_CLIENT_ID=...
-#      COMPAI_OIDC_CLIENT_SECRET=...
+# STRATÉGIE SSO PAR BRIQUE (voir README §Matrice SSO) :
+#   - Open WebUI, Langfuse, Comp AI : OIDC natif  → oauth2provider
+#   - Dify CE, Infisical OSS, Traefik dashboard   → proxy (forwardAuth via outpost embarqué)
 #
-# SLUGS DE RÉFÉRENCE (correspondance avec .env) :
-#   LANGFUSE_OIDC_SLUG = langfuse (pour AUTH_CUSTOM_ISSUER)
-#   Exemple : https://auth.${DOMAIN}/application/o/langfuse/
-#
-# LIMITES IMPORTANTES (documentées honnêtement) :
-#   - Dify CE : pas d'OIDC natif → ForwardAuth Traefik (proxy-provider)
-#   - Infisical OSS : pas d'OIDC natif → ForwardAuth Traefik (proxy-provider)
-#   - Open WebUI, Langfuse, Comp AI : OIDC natif complet
+# APRÈS APPLICATION (OIDC natif) :
+#   Les client_id / client_secret sont générés par Authentik. Les reporter dans .env :
+#     OPENWEBUI_OIDC_CLIENT_ID / _SECRET
+#     LANGFUSE_OIDC_CLIENT_ID  / _SECRET
+#     COMPAI_OIDC_CLIENT_ID    / _SECRET
+#   (le script scripts/sync-oidc-secrets.sh automatise cette extraction).
 # =============================================================================
 
 version: 1
 metadata:
-  name: AI Workspace — Providers OIDC et Applications
+  name: AI Workspace — Providers OIDC, Proxy et Applications
+
+context:
+  domain: !Env [AIWS_DOMAIN, "aiws.localhost"]
 
 entries:
 
@@ -50,7 +44,6 @@ entries:
     identifiers:
       name: ai-workspace-users
     attrs:
-      name: ai-workspace-users
       is_superuser: false
 
   - model: authentik_core.group
@@ -58,79 +51,28 @@ entries:
     identifiers:
       name: ai-workspace-admins
     attrs:
-      name: ai-workspace-admins
       is_superuser: false
-
-
-  # ===========================================================================
-  # SCOPES OIDC personnalisés
-  # ===========================================================================
-
-  - model: authentik_providers_oauth2.scopemapping
-    state: present
-    identifiers:
-      managed: goauthentik.io/providers/oauth2/scope-openid
-    attrs:
-      name: "OpenID"
-      scope_name: openid
-      description: "OpenID Connect scope"
-      expression: "return {}"
-
-  - model: authentik_providers_oauth2.scopemapping
-    state: present
-    identifiers:
-      managed: goauthentik.io/providers/oauth2/scope-email
-    attrs:
-      name: "Email"
-      scope_name: email
-      description: "Email address"
-      expression: |
-        return {
-            "email": request.user.email,
-            "email_verified": True,
-        }
-
-  - model: authentik_providers_oauth2.scopemapping
-    state: present
-    identifiers:
-      managed: goauthentik.io/providers/oauth2/scope-profile
-    attrs:
-      name: "Profile"
-      scope_name: profile
-      description: "User profile"
-      expression: |
-        return {
-            "name": request.user.name,
-            "given_name": request.user.name,
-            "preferred_username": request.user.username,
-            "nickname": request.user.username,
-            "groups": [group.name for group in request.user.ak_groups.all()],
-        }
-
 
   # ===========================================================================
   # 1. OPEN WEBUI — OIDC natif
+  #    Callback : https://chat.<domain>/oauth/oidc/callback
   # ===========================================================================
-  # Callback : https://chat.${DOMAIN}/oauth/oidc/callback
-  # Variables .env à reporter après blueprint :
-  #   OPENWEBUI_OIDC_CLIENT_ID   = <client_id généré>
-  #   OPENWEBUI_OIDC_CLIENT_SECRET = <client_secret généré>
 
   - model: authentik_providers_oauth2.oauth2provider
     state: present
     identifiers:
       name: provider-open-webui
     attrs:
-      name: provider-open-webui
       authentication_flow: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       client_type: confidential
-      # client_id et client_secret sont générés par Authentik automatiquement
-      redirect_uris: |
-        https://chat.!python/object/apply:os.environ.get ['DOMAIN', 'aiws.localhost']/oauth/oidc/callback
       include_claims_in_id_token: true
       sub_mode: hashed_user_id
       signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      redirect_uris:
+        - matching_mode: strict
+          url: !Format ["https://chat.%s/oauth/oidc/callback", !Context domain]
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
@@ -144,38 +86,33 @@ entries:
       slug: open-webui
     attrs:
       name: Open WebUI
-      slug: open-webui
       provider: !Find [authentik_providers_oauth2.oauth2provider, [name, provider-open-webui]]
       meta_icon: https://raw.githubusercontent.com/open-webui/open-webui/refs/heads/main/static/favicon.png
       meta_description: "Interface de chat LLM unifiée"
       policy_engine_mode: any
-      group: !Find [authentik_core.group, [name, ai-workspace-users]]
-
+      group: AI
 
   # ===========================================================================
   # 2. LANGFUSE — OIDC natif (AUTH_CUSTOM_* via NextAuth)
+  #    Callback : https://observe.<domain>/api/auth/callback/custom
+  #    Issuer   : https://auth.<domain>/application/o/langfuse/
   # ===========================================================================
-  # Callback : https://observe.${DOMAIN}/api/auth/callback/custom
-  # Issuer URL : https://auth.${DOMAIN}/application/o/langfuse/
-  # Variables .env à reporter :
-  #   LANGFUSE_OIDC_CLIENT_ID     = <client_id généré>
-  #   LANGFUSE_OIDC_CLIENT_SECRET = <client_secret généré>
-  #   AUTH_CUSTOM_ISSUER dans langfuse.yml utilise slug "langfuse" → LANGFUSE_OIDC_SLUG
 
   - model: authentik_providers_oauth2.oauth2provider
     state: present
     identifiers:
       name: provider-langfuse
     attrs:
-      name: provider-langfuse
       authentication_flow: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       client_type: confidential
-      redirect_uris: |
-        https://observe.!python/object/apply:os.environ.get ['DOMAIN', 'aiws.localhost']/api/auth/callback/custom
       include_claims_in_id_token: true
       sub_mode: hashed_user_id
       signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      redirect_uris:
+        - matching_mode: strict
+          url: !Format ["https://observe.%s/api/auth/callback/custom", !Context domain]
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
@@ -189,36 +126,32 @@ entries:
       slug: langfuse
     attrs:
       name: Langfuse
-      slug: langfuse
       provider: !Find [authentik_providers_oauth2.oauth2provider, [name, provider-langfuse]]
       meta_icon: https://langfuse.com/favicon.ico
       meta_description: "Observabilité LLM — traces, coûts, évaluations"
       policy_engine_mode: any
-      group: !Find [authentik_core.group, [name, ai-workspace-users]]
-
+      group: AI
 
   # ===========================================================================
-  # 3. COMP AI — OIDC/OAuth (NextAuth)
+  # 3. COMP AI — OIDC natif (NextAuth)  [service optionnel, désactivé en local]
+  #    Callback : https://compliance.<domain>/api/auth/callback/authentik
   # ===========================================================================
-  # Callback : https://compliance.${DOMAIN}/api/auth/callback/authentik
-  # Variables .env à reporter :
-  #   COMPAI_OIDC_CLIENT_ID     = <client_id généré>
-  #   COMPAI_OIDC_CLIENT_SECRET = <client_secret généré>
 
   - model: authentik_providers_oauth2.oauth2provider
     state: present
     identifiers:
       name: provider-comp-ai
     attrs:
-      name: provider-comp-ai
       authentication_flow: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       client_type: confidential
-      redirect_uris: |
-        https://compliance.!python/object/apply:os.environ.get ['DOMAIN', 'aiws.localhost']/api/auth/callback/authentik
       include_claims_in_id_token: true
       sub_mode: hashed_user_id
       signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      redirect_uris:
+        - matching_mode: strict
+          url: !Format ["https://compliance.%s/api/auth/callback/authentik", !Context domain]
       property_mappings:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
@@ -232,35 +165,27 @@ entries:
       slug: comp-ai
     attrs:
       name: Comp AI
-      slug: comp-ai
       provider: !Find [authentik_providers_oauth2.oauth2provider, [name, provider-comp-ai]]
       meta_icon: https://comp.ai/favicon.ico
       meta_description: "Conformité SOC 2 / ISO 27001 / RGPD"
       policy_engine_mode: any
-      group: !Find [authentik_core.group, [name, ai-workspace-admins]]
-
+      group: Gouvernance
 
   # ===========================================================================
-  # 4. DIFY — ForwardAuth (pas d'OIDC natif en édition CE)
+  # 4. DIFY — Proxy provider (forwardAuth Traefik, pas d'OIDC natif en CE)
   # ===========================================================================
-  # Stratégie : proxy-provider Authentik (forward-auth Traefik)
-  # Le middleware "authentik-forward-auth@file" dans proxy/dynamic/ pointe vers
-  # l'outpost intégré d'Authentik.
-  # IMPORTANT : les utilisateurs voient la page de login Authentik, puis sont
-  # redirigés vers Dify. Ils doivent ensuite créer un compte Dify séparément.
-  # Pour un SSO complet sur Dify : passer à l'édition Enterprise.
 
   - model: authentik_providers_proxy.proxyprovider
     state: present
     identifiers:
       name: provider-dify-forwardauth
     attrs:
-      name: provider-dify-forwardauth
       authentication_flow: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       mode: forward_single
-      external_host: !python/object/apply:os.environ.get ['DIFY_EXTERNAL_HOST', 'https://dify.aiws.localhost']
-      cookie_domain: !python/object/apply:os.environ.get ['DOMAIN', 'aiws.localhost']
+      external_host: !Format ["https://dify.%s", !Context domain]
+      cookie_domain: !Context domain
       access_token_validity: hours=24
 
   - model: authentik_core.application
@@ -269,31 +194,27 @@ entries:
       slug: dify
     attrs:
       name: Dify
-      slug: dify
       provider: !Find [authentik_providers_proxy.proxyprovider, [name, provider-dify-forwardauth]]
       meta_icon: https://dify.ai/favicon.ico
       meta_description: "Orchestration IA — RAG, agents, workflows"
       policy_engine_mode: any
-      group: !Find [authentik_core.group, [name, ai-workspace-users]]
-
+      group: AI
 
   # ===========================================================================
-  # 5. INFISICAL — ForwardAuth (OIDC = tier payant en OSS)
+  # 5. INFISICAL — Proxy provider (forwardAuth, OIDC = tier payant en OSS)
   # ===========================================================================
-  # Même stratégie que Dify : proxy-provider forward-auth
-  # Pour OIDC complet : passer à Infisical Cloud ou édition payante.
 
   - model: authentik_providers_proxy.proxyprovider
     state: present
     identifiers:
       name: provider-infisical-forwardauth
     attrs:
-      name: provider-infisical-forwardauth
       authentication_flow: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       mode: forward_single
-      external_host: !python/object/apply:os.environ.get ['INFISICAL_EXTERNAL_HOST', 'https://secrets.aiws.localhost']
-      cookie_domain: !python/object/apply:os.environ.get ['DOMAIN', 'aiws.localhost']
+      external_host: !Format ["https://secrets.%s", !Context domain]
+      cookie_domain: !Context domain
       access_token_validity: hours=24
 
   - model: authentik_core.application
@@ -302,16 +223,14 @@ entries:
       slug: infisical
     attrs:
       name: Infisical
-      slug: infisical
       provider: !Find [authentik_providers_proxy.proxyprovider, [name, provider-infisical-forwardauth]]
       meta_icon: https://infisical.com/favicon.ico
       meta_description: "Gestionnaire de secrets — clés LLM, variables env"
       policy_engine_mode: any
-      group: !Find [authentik_core.group, [name, ai-workspace-admins]]
-
+      group: Gouvernance
 
   # ===========================================================================
-  # 6. TRAEFIK DASHBOARD — ForwardAuth
+  # 6. TRAEFIK DASHBOARD — Proxy provider (forwardAuth, admin only)
   # ===========================================================================
 
   - model: authentik_providers_proxy.proxyprovider
@@ -319,12 +238,12 @@ entries:
     identifiers:
       name: provider-traefik-dashboard
     attrs:
-      name: provider-traefik-dashboard
       authentication_flow: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       mode: forward_single
-      external_host: !python/object/apply:os.environ.get ['TRAEFIK_EXTERNAL_HOST', 'https://traefik.aiws.localhost']
-      cookie_domain: !python/object/apply:os.environ.get ['DOMAIN', 'aiws.localhost']
+      external_host: !Format ["https://traefik.%s", !Context domain]
+      cookie_domain: !Context domain
       access_token_validity: hours=8
 
   - model: authentik_core.application
@@ -333,9 +252,34 @@ entries:
       slug: traefik-dashboard
     attrs:
       name: Traefik Dashboard
-      slug: traefik-dashboard
       provider: !Find [authentik_providers_proxy.proxyprovider, [name, provider-traefik-dashboard]]
       meta_icon: https://traefik.io/favicon.ico
       meta_description: "Dashboard reverse proxy (admin uniquement)"
       policy_engine_mode: any
-      group: !Find [authentik_core.group, [name, ai-workspace-admins]]
+      group: Gouvernance
+
+  # ===========================================================================
+  # 7. OUTPOST EMBARQUÉ — liaison des proxy providers
+  #    Sans cette liaison, l'endpoint /outpost.goauthentik.io/auth/traefik
+  #    renvoie 404 (l'outpost ne connaît pas les applications proxy).
+  # ===========================================================================
+
+  - model: authentik_outposts.outpost
+    state: present
+    identifiers:
+      managed: goauthentik.io/outposts/embedded
+    attrs:
+      name: authentik Embedded Outpost
+      type: proxy
+      # authentik_host doit pointer vers l'URL publique de l'IdP, sinon le proxy
+      # redirige vers http://localhost (cassé en navigateur).
+      config:
+        authentik_host: !Format ["https://auth.%s", !Context domain]
+        authentik_host_browser: !Format ["https://auth.%s", !Context domain]
+        authentik_host_insecure: false
+        log_level: info
+        object_naming_template: "ak-outpost-%(name)s"
+      providers:
+        - !Find [authentik_providers_proxy.proxyprovider, [name, provider-dify-forwardauth]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, provider-infisical-forwardauth]]
+        - !Find [authentik_providers_proxy.proxyprovider, [name, provider-traefik-dashboard]]

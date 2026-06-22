@@ -35,15 +35,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${PROJECT_ROOT}/.env"
 
-if [[ -f "${ENV_FILE}" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "${ENV_FILE}"
-    set +a
-fi
+# Extraction ciblée et sûre (le .env contient des placeholders <...> et des
+# commentaires avec parenthèses/apostrophes qui cassent un `source` bash ;
+# Docker Compose parse le .env nativement, pas via bash).
+env_get() {
+    local key="$1"
+    [[ -f "${ENV_FILE}" ]] || return 0
+    grep -E "^${key}=" "${ENV_FILE}" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"'"'"'\r' || true
+}
 
+DOMAIN="${DOMAIN:-$(env_get DOMAIN)}"
 DOMAIN="${DOMAIN:-aiws.localhost}"
-PROTOCOL="${HEALTHCHECK_PROTOCOL:-https}"
+PROTOCOL="${HEALTHCHECK_PROTOCOL:-$(env_get HEALTHCHECK_PROTOCOL)}"
+PROTOCOL="${PROTOCOL:-https}"
 
 # ── Compteurs ─────────────────────────────────────────────────────────────────
 COUNT_OK=0
@@ -216,7 +220,14 @@ if [[ "${HTTP_ONLY}" == "false" ]]; then
     check_container "langfuse-web"    "Langfuse Web"
     check_container "langfuse-worker" "Langfuse Worker"
     check_container "infisical"       "Infisical"
-    check_container "comp-ai"         "Comp AI"
+    # Comp AI est optionnel (désactivé par défaut en local : build trop lourd).
+    # Ne le compte comme KO que s'il est censé tourner.
+    if docker inspect comp-ai &>/dev/null 2>&1; then
+        check_container "comp-ai"     "Comp AI"
+    elif [[ "${QUIET}" == "false" ]]; then
+        printf "  %s  %s  %s\n" "$(status_label WARN)" "$(pad_right "Comp AI" 22)" \
+            "Désactivé (optionnel — activer via make build-comp-ai)"
+    fi
 
     if [[ "${QUIET}" == "false" ]]; then
         echo ""
@@ -240,8 +251,10 @@ check_http "Dify"        "${PROTOCOL}://dify.${DOMAIN}/"               "200" ""
 check_http "Langfuse"    "${PROTOCOL}://observe.${DOMAIN}/"            "200" ""
 # Infisical
 check_http "Infisical"   "${PROTOCOL}://secrets.${DOMAIN}/"            "200" ""
-# Comp AI
-check_http "Comp AI"     "${PROTOCOL}://compliance.${DOMAIN}/"         "200" ""
+# Comp AI (optionnel — vérifié seulement si le conteneur existe)
+if docker inspect comp-ai &>/dev/null 2>&1; then
+    check_http "Comp AI"     "${PROTOCOL}://compliance.${DOMAIN}/"         "200" ""
+fi
 # Authentik
 check_http "Authentik"   "${PROTOCOL}://auth.${DOMAIN}/api/v3/"        "200" "API Authentik"
 # Traefik dashboard (protégé par forwardAuth)
@@ -256,9 +269,10 @@ if [[ "${HTTP_ONLY}" == "false" ]]; then
         echo "────────────────────────────────────────────────────────────────"
     fi
 
-    # Qdrant via son endpoint healthz
-    QDRANT_HEALTH="$(docker exec qdrant curl -sf http://localhost:6333/healthz 2>/dev/null | head -c 20 || echo "")"
-    if echo "${QDRANT_HEALTH}" | grep -q "ok\|true\|200"; then
+    # Qdrant via son endpoint healthz. L'image Qdrant n'embarque ni curl ni wget, on
+    # sonde donc depuis un conteneur outillé du réseau aiws (open-webui a curl).
+    QDRANT_HEALTH="$(docker exec open-webui curl -sf http://qdrant:6333/healthz 2>/dev/null | head -c 20 || echo "")"
+    if echo "${QDRANT_HEALTH}" | grep -qi "ok\|true\|200\|passed"; then
         status="OK"
     else
         status="KO"

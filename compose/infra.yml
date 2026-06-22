@@ -49,12 +49,16 @@ services:
     image: redis:7-alpine
     container_name: redis
     restart: unless-stopped
+    # noeviction : Redis est partagé par Infisical (gestionnaire de secrets) qui exige
+    # des clés persistantes. allkeys-lru évincerait silencieusement ses données sous
+    # pression mémoire → perte de sessions/secrets. noeviction renvoie une erreur OOM
+    # plutôt que d'évincer ; dimensionner REDIS_MAXMEMORY en conséquence.
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD}
       --appendonly yes
       --maxmemory ${REDIS_MAXMEMORY:-512mb}
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
     healthcheck:

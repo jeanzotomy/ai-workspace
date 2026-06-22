@@ -17,10 +17,13 @@
 services:
 
   comp-ai:
-    # Build depuis les sources clonées par bootstrap.sh
+    # Build depuis les sources clonées par bootstrap.sh.
+    # ../vendor/comp : chemin relatif depuis compose/ (bug include: — cf. portal.yml).
+    # Le repo trycompai/comp (Bun monorepo) expose le target `app` via le Dockerfile
+    # RACINE (apps/app/Dockerfile n'existe plus dans les versions récentes).
     build:
-      context: ./vendor/comp
-      dockerfile: apps/app/Dockerfile
+      context: ../vendor/comp
+      dockerfile: Dockerfile
       target: app
     image: aiws-comp-ai:latest
     container_name: comp-ai

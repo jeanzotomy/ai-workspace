@@ -57,8 +57,8 @@ x-dify-common-env: &dify-common-env
   CODE_EXECUTION_API_KEY: "${DIFY_SANDBOX_API_KEY}"
   ACCESS_TOKEN_EXPIRE_MINUTES: "60"
   REFRESH_TOKEN_EXPIRE_DAYS: "30"
-  WEB_API_CORS_ALLOW_ORIGINS: "*"
-  CONSOLE_CORS_ALLOW_ORIGINS: "*"
+  WEB_API_CORS_ALLOW_ORIGINS: "https://dify.${DOMAIN}"
+  CONSOLE_CORS_ALLOW_ORIGINS: "https://dify.${DOMAIN}"
 
   # Vector store — Qdrant partagé
   VECTOR_STORE: "qdrant"

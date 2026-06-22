@@ -10,6 +10,7 @@ include:
   - compose/open-webui.yml
   - compose/langfuse.yml
   - compose/infisical.yml
+  - compose/portal.yml
   - compose/comp-ai.yml
 
 networks:
@@ -17,23 +18,35 @@ networks:
   # external:true sur TOUS les fichiers (racine + compose/*.yml) pour la cohérence include:.
   aiws:
     external: true
-    name: aiws
 
 volumes:
+  # Tous les volumes sont créés en externe au bootstrap (external: true partout pour
+  # cohérence avec les fichiers compose/*.yml inclus — sinon conflit de merge).
   # Infra partagée
   postgres_data:
+    external: true
   redis_data:
+    external: true
   minio_data:
+    external: true
   clickhouse_data:
+    external: true
   qdrant_data:
+    external: true
   # Traefik
   traefik_acme:
+    external: true
   # Authentik
   authentik_media:
+    external: true
   authentik_certs:
+    external: true
   # Open WebUI
   open_webui_data:
+    external: true
   # Infisical
   infisical_data:
+    external: true
   # Comp AI
   comp_ai_data:
+    external: true

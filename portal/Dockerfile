@@ -11,7 +11,7 @@
 #   docker build -t aiws-portal .
 #   docker run -e DOMAIN=ai.example.com -p 8080:80 aiws-portal
 
-FROM nginx:alpine
+FROM nginx:1.27-alpine
 
 # Métadonnées
 LABEL org.opencontainers.image.title="AI Workspace Portal"
@@ -33,7 +33,7 @@ RUN chmod +x /docker-entrypoint.sh
 
 # Vérification de santé (utilisée par Docker et Traefik)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget -qO- http://localhost/health || exit 1
+  CMD wget -qO- http://127.0.0.1/health || exit 1
 
 EXPOSE 80
 

@@ -1,9 +1,18 @@
-# Secrets & env (jamais commités)
+# Secrets & env (jamais commités) — couvrir TOUS les backups, pas juste .env exact
 .env
 .env.local
 *.env.local
+.env.*
+!.env.example
+*.bak
+*.bak-*
 config/authentik/.secrets/
 scripts/.generated/
+
+# Clés & certificats TLS (auto-signés locaux et autres)
+*.key
+*.crt
+proxy/certs/
 
 # Volumes & données runtime
 volumes/

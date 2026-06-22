@@ -46,7 +46,7 @@ EOSQL
 
     # Créer la base si elle n'existe pas
     psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname postgres <<-EOSQL
-        SELECT 'CREATE DATABASE "${dbname}" OWNER "${user}" ENCODING ''UTF8'' LC_COLLATE ''en_US.UTF-8'' LC_CTYPE ''en_US.UTF-8'''
+        SELECT 'CREATE DATABASE "${dbname}" OWNER "${user}" ENCODING ''UTF8'''
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${dbname}')
         \gexec
 EOSQL

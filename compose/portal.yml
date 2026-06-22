@@ -1,0 +1,37 @@
+# compose/portal.yml — Portail AI Workspace (page d'accueil https://aiws.localhost)
+#
+# IMPORTANT : chemins relatifs résolus depuis compose/ (comportement include:).
+# Le build context doit pointer vers ../portal (= racine du projet /portal/).
+# Ne pas écrire ./portal ici — cela résoudrait vers compose/portal/ (inexistant).
+
+services:
+
+  portal:
+    build:
+      context: ../portal
+      dockerfile: Dockerfile
+    container_name: portal
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    networks:
+      - aiws
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=aiws"
+      # Router HTTPS — domaine racine (sans sous-domaine)
+      - "traefik.http.routers.portal.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.portal.entrypoints=websecure"
+      - "traefik.http.routers.portal.tls=true"
+      - "traefik.http.routers.portal.tls.certresolver=letsencrypt"
+      - "traefik.http.services.portal.loadbalancer.server.port=80"
+      # Pas de forwardAuth : la page d'accueil est publique
+      - "traefik.http.routers.portal.middlewares=security-headers@file,compress@file"
+      # Redirect HTTP → HTTPS
+      - "traefik.http.routers.portal-http.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.portal-http.entrypoints=web"
+      - "traefik.http.routers.portal-http.middlewares=redirect-to-https@file"
+
+networks:
+  aiws:
+    external: true

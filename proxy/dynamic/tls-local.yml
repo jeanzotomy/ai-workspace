@@ -1,0 +1,18 @@
+# proxy/dynamic/tls-local.yml — Configuration TLS locale (certificat auto-signé wildcard)
+# Chargé automatiquement par Traefik (providers.file.directory=/etc/traefik/dynamic).
+# En PROD : ce fichier est inoffensif — ACME fournit les certs qui priment toujours
+# sur le defaultCertificate (Traefik utilise ACME si le certresolver est résolu,
+# sinon fallback sur le defaultCertificate). Sur .localhost, ACME échoue donc le
+# defaultCertificate prend le relais pour TOUS les routers.
+
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        # Chemin dans le container Traefik (voir volume dans override)
+        certFile: "/etc/traefik/certs/aiws-local.crt"
+        keyFile:  "/etc/traefik/certs/aiws-local.key"
+
+  certificates:
+    - certFile: "/etc/traefik/certs/aiws-local.crt"
+      keyFile:  "/etc/traefik/certs/aiws-local.key"

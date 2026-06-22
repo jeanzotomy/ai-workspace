@@ -14,8 +14,10 @@
 services:
 
   infisical:
-    # PIN CE TAG à un digest spécifique en production (voir commentaire ci-dessus)
-    image: infisical/infisical:latest
+    # Image épinglée par digest (intégrité — un `docker pull` ne tirera pas une version
+    # non testée). Mettre à jour le digest volontairement lors d'un upgrade.
+    # tag d'origine : infisical/infisical:latest
+    image: infisical/infisical@sha256:257e9e4269e081448bea0c94f72631f040e6a792bd3f2e4a6cef096effa66b29
     container_name: infisical
     restart: unless-stopped
     environment:

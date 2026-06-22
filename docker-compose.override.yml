@@ -1,0 +1,130 @@
+# docker-compose.override.yml — ajustements LOCAL (dev) uniquement.
+# Auto-chargé par docker compose. Ne pas déployer en prod.
+
+services:
+
+  # ─── Traefik — TLS local (certificat auto-signé wildcard *.aiws.localhost) ──────
+  # Remplace la commande de prod pour :
+  #   1. Désactiver Let's Encrypt (impossible sur .localhost — ACME bloque tout le TLS)
+  #   2. Garder un resolver "letsencrypt" déclaré (les labels des services y font référence)
+  #      mais pointer vers un CA de staging inoffensif (caServer bidon) → ACME ne bloquera
+  #      pas le routage. Le defaultCertificate (tls-local.yml) prend le relais.
+  #   3. Monter proxy/certs/ pour que tls-local.yml puisse référencer les fichiers.
+  #
+  # Pourquoi ne pas retirer --certificatesresolvers.*  ?
+  #   Les labels des containers ont tls.certresolver=letsencrypt. Si ce resolver
+  #   n'est pas défini du tout, Traefik log une erreur par router et peut refuser
+  #   de démarrer le TLS. Le déclarer avec un caServer qui n'existe pas localement
+  #   est la solution la plus propre : le resolver est "défini" mais jamais appelé
+  #   puisque le defaultCertificate suffit.
+  traefik:
+    command:
+      # Entrées réseau (identiques à la prod)
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      - "--entrypoints.websecure.address=:443"
+      # TLS ACME — résolver "letsencrypt" déclaré pour satisfaire les labels,
+      # mais pointant vers un CA inexistant localement (pas de spam ACME).
+      - "--certificatesresolvers.letsencrypt.acme.email=dev@local.invalid"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.caserver=https://127.0.0.1:14000/dir"
+      # Provider Docker (identique prod)
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=aiws"
+      # Provider file (middlewares + tls-local.yml)
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      # API & Dashboard
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      # Logs (plus verbeux en local pour le debug)
+      - "--log.level=DEBUG"
+      - "--accesslog=true"
+      - "--accesslog.format=json"
+      # Ping healthcheck
+      - "--ping=true"
+    volumes:
+      # Bug identique à postgres/init-multi-db.sh : compose/traefik.yml déclare
+      # ./proxy/dynamic qui se résout depuis compose/ → compose/proxy/dynamic (vide).
+      # L'override (à la racine) écrase ce volume avec le bon chemin.
+      - ./proxy/dynamic:/etc/traefik/dynamic:ro
+      # Certificat auto-signé wildcard *.aiws.localhost (référencé par tls-local.yml)
+      - ./proxy/certs:/etc/traefik/certs:ro
+
+  # Bug include: dans compose/infra.yml, le chemin ./scripts/init-multi-db.sh se résout
+  # relativement à compose/ (→ compose/scripts/…, inexistant) ; docker monte alors un
+  # dossier vide et les bases multi-tenant ne sont jamais créées. Ici (override à la
+  # racine) le chemin se résout correctement vers ./scripts/init-multi-db.sh.
+  postgres:
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-multi-db.sh:/docker-entrypoint-initdb.d/init-multi-db.sh:ro
+
+  # L'image Qdrant n'embarque ni curl/wget/nc ni /dev/tcp : le healthcheck par défaut
+  # (curl http://localhost:6333/healthz) échoue toujours → statut "unhealthy" trompeur
+  # alors que le service répond. On le désactive (aucun service ne dépend de sa santé).
+  qdrant:
+    healthcheck:
+      test: ["NONE"]
+
+  # Typo dans compose/dify.yml : le middleware s'appelle authentik-forwardauth@file
+  # (pas authentik-forward-auth@file avec tiret supplémentaire).
+  # Correction via override label sur dify-nginx.
+  dify-nginx:
+    labels:
+      traefik.http.routers.dify.middlewares: "authentik-forwardauth@file,security-headers@file,compress@file"
+
+  # Même bug include: que postgres/traefik — compose/authentik.yml déclare
+  # ./config/authentik/blueprints qui se résout depuis compose/ vers
+  # compose/config/authentik/blueprints (vide, auto-créé par docker) → le blueprint
+  # n'est jamais monté → aucun provider/application OIDC créé. L'override (à la racine)
+  # remonte le bon chemin (clé = target /blueprints/custom). On passe aussi AIWS_DOMAIN
+  # pour que le blueprint construise les URLs (!Env [AIWS_DOMAIN, aiws.localhost]).
+  authentik-server:
+    environment:
+      AIWS_DOMAIN: ${DOMAIN}
+    volumes:
+      - authentik_media:/media
+      - authentik_certs:/certs
+      - ./config/authentik/blueprints:/blueprints/custom:ro
+
+  authentik-worker:
+    environment:
+      AIWS_DOMAIN: ${DOMAIN}
+    volumes:
+      - authentik_media:/media
+      - authentik_certs:/certs
+      - ./config/authentik/blueprints:/blueprints/custom:ro
+
+  # ─── SSO OIDC serveur→serveur (LOCAL dev) ──────────────────────────────────────
+  # Deux pièges pour le flux OIDC natif (Open WebUI / Langfuse) en local :
+  #  1. DNS : auth.aiws.localhost résout en ::1 (loopback) DANS le conteneur → l'échange
+  #     de token serveur-side échoue. extra_hosts host-gateway fait passer la requête par
+  #     l'hôte (port 443 publié) → Traefik → Authentik. L'issuer reste identique côté
+  #     navigateur et côté serveur (cohérence OIDC obligatoire).
+  #  2. TLS : le cert wildcard *.aiws.localhost est auto-signé. On monte la CA locale.
+  #     - Node (Langfuse) : NODE_EXTRA_CA_CERTS AJOUTE à la base → cert local seul suffit.
+  #     - Python (Open WebUI) : REQUESTS_CA_BUNDLE/SSL_CERT_FILE REMPLACENT la base → on
+  #       fournit un bundle combiné (CAs publiques + cert local) pour ne pas casser le TLS
+  #       sortant vers les APIs LLM publiques.
+  open-webui:
+    extra_hosts:
+      - "auth.aiws.localhost:host-gateway"
+    environment:
+      REQUESTS_CA_BUNDLE: /certs/ca-bundle.crt
+      SSL_CERT_FILE: /certs/ca-bundle.crt
+    volumes:
+      - open_webui_data:/app/backend/data
+      - ./proxy/certs/ca-bundle.crt:/certs/ca-bundle.crt:ro
+
+  langfuse-web:
+    extra_hosts:
+      - "auth.aiws.localhost:host-gateway"
+    environment:
+      NODE_EXTRA_CA_CERTS: /certs/aiws-local.crt
+    volumes:
+      - ./proxy/certs/aiws-local.crt:/certs/aiws-local.crt:ro

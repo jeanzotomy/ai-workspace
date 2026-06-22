@@ -134,7 +134,9 @@ for line in lines:
     if '=<générer>' in line or '=<générer> ' in line:
         varname = line.split('=')[0]
         # Détecter si on veut 16 ou 32 octets selon le commentaire
-        if '16 octets' in line or 'hex 16' in line or 'SALT' in varname or 'ENCRYPTION_KEY' in varname:
+        # NB: LANGFUSE_ENCRYPTION_KEY exige 32 octets (64 chars hex), seul
+        # INFISICAL_ENCRYPTION_KEY veut 16 octets (32 chars hex).
+        if '16 octets' in line or 'hex 16' in line or 'SALT' in varname or 'INFISICAL_ENCRYPTION_KEY' in varname:
             secret = subprocess.check_output(['openssl', 'rand', '-hex', '16']).decode().strip()
         else:
             secret = subprocess.check_output(['openssl', 'rand', '-hex', '32']).decode().strip()
@@ -151,7 +153,7 @@ PYEOF
         # Fallback sed — remplace <générer> par un secret (moins précis pour l'unicité)
         warn "python3 absent — utilisation de sed (secrets moins différenciés)"
         while IFS= read -r line; do
-            if echo "${line}" | grep -q '=<générer>'; do
+            if echo "${line}" | grep -q '=<générer>'; then
                 varname="$(echo "${line}" | cut -d= -f1)"
                 secret="$(openssl rand -hex 32)"
                 echo "${varname}=${secret}"
@@ -235,6 +237,42 @@ for vol in "${VOLUMES[@]}"; do
         success "Volume '${vol}' créé"
     fi
 done
+
+# =============================================================================
+# ÉTAPE 5b — TLS local : cert wildcard auto-signé + bundle CA combiné
+# =============================================================================
+# Génère (si absent) le certificat wildcard auto-signé *.${DOMAIN} utilisé par Traefik
+# en local (tls-local.yml), puis un bundle CA combiné (CAs publiques de l'hôte + cert
+# local) requis par les clients OIDC serveur-side (Open WebUI/Langfuse) pour faire
+# confiance à https://auth.${DOMAIN} sans casser le TLS sortant vers les APIs publiques.
+header "Étape 5b/6 — TLS local (cert wildcard + bundle CA)"
+
+CERT_DIR="${PROJECT_ROOT:-.}/proxy/certs"
+mkdir -p "${CERT_DIR}"
+TLS_DOMAIN="${DOMAIN:-aiws.localhost}"
+
+if [[ -f "${CERT_DIR}/aiws-local.crt" && -f "${CERT_DIR}/aiws-local.key" ]]; then
+    success "Certificat local '${CERT_DIR}/aiws-local.crt' existe déjà"
+else
+    openssl req -x509 -nodes -newkey rsa:4096 -days 3650 \
+        -keyout "${CERT_DIR}/aiws-local.key" \
+        -out "${CERT_DIR}/aiws-local.crt" \
+        -subj "/CN=*.${TLS_DOMAIN}/O=AI Workspace local" \
+        -addext "subjectAltName=DNS:${TLS_DOMAIN},DNS:*.${TLS_DOMAIN}" >/dev/null 2>&1
+    chmod 600 "${CERT_DIR}/aiws-local.key"
+    success "Certificat wildcard auto-signé généré pour *.${TLS_DOMAIN} (10 ans)"
+fi
+
+# Bundle CA combiné : régénéré à chaque bootstrap (le cert local peut avoir changé).
+HOST_CA="/etc/ssl/certs/ca-certificates.crt"
+if [[ -f "${HOST_CA}" ]]; then
+    cat "${HOST_CA}" "${CERT_DIR}/aiws-local.crt" > "${CERT_DIR}/ca-bundle.crt"
+    success "Bundle CA combiné généré (CAs hôte + cert local) → proxy/certs/ca-bundle.crt"
+else
+    # Pas de bundle système : au minimum, le cert local seul (TLS public risque d'échouer).
+    cp "${CERT_DIR}/aiws-local.crt" "${CERT_DIR}/ca-bundle.crt"
+    warn "Bundle CA système introuvable (${HOST_CA}) — ca-bundle.crt ne contient que le cert local"
+fi
 
 # =============================================================================
 # ÉTAPE 6 — Démarrage MinIO + création des buckets

@@ -32,7 +32,10 @@ http:
         # HSTS — force HTTPS pour 1 an (incluant sous-domaines)
         stsSeconds: 31536000
         stsIncludeSubdomains: true
-        stsPreload: true
+        # stsPreload : NE passer à true qu'au moment de la mise en prod sur le domaine
+        # définitif ET après soumission volontaire à hstspreload.org. Une fois preloadé,
+        # impossible de revenir à HTTP sans procédure de retrait longue (mois).
+        stsPreload: false
         # Clickjacking
         frameDeny: false        # false car Authentik utilise des iframes légitimes
         customFrameOptionsValue: "SAMEORIGIN"
