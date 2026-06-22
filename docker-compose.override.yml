@@ -74,9 +74,17 @@ services:
   # Typo dans compose/dify.yml : le middleware s'appelle authentik-forwardauth@file
   # (pas authentik-forward-auth@file avec tiret supplémentaire).
   # Correction via override label sur dify-nginx.
+  #
+  # Bug page nginx par défaut : compose/dify.yml monte le volume NOMMÉ VIDE
+  # dify_nginx_conf sur /etc/nginx/conf.d. Docker y copie la default.conf de l'image
+  # nginx → la page « Welcome to nginx! » est servie à la place de Dify. On écrase ce
+  # volume (même target → l'override gagne) par un bind de la vraie conf reverse-proxy
+  # (proxy/nginx/default.conf) qui route vers dify-web:3000 et dify-api:5001.
   dify-nginx:
     labels:
       traefik.http.routers.dify.middlewares: "authentik-forwardauth@file,security-headers@file,compress@file"
+    volumes:
+      - ./proxy/nginx:/etc/nginx/conf.d:ro
 
   # Même bug include: que postgres/traefik — compose/authentik.yml déclare
   # ./config/authentik/blueprints qui se résout depuis compose/ vers
