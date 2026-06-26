@@ -219,6 +219,54 @@ else
     success "vendor/comp cloné"
 fi
 
+# Patch du Dockerfile upstream : l'étape `deps` ne copie qu'une liste FIGÉE de
+# package.json. Quand le repo ajoute un package workspace (ex: auth/billing/company/db),
+# il est omis et `bun install` échoue avec "@trycompai/<x>@workspace:* failed to resolve",
+# rendant l'image impossible à construire. On régénère le bloc COPY à partir des
+# packages réellement présents (idempotent — robuste aux évolutions upstream).
+if [[ -f "${VENDOR_COMP}/Dockerfile" ]] && command -v python3 &>/dev/null; then
+    if python3 - "${VENDOR_COMP}" <<'PYEOF'
+import os, re, sys, glob
+root = sys.argv[1]
+dockerfile = os.path.join(root, "Dockerfile")
+with open(dockerfile) as f:
+    content = f.read()
+
+pkgs = sorted(
+    os.path.basename(os.path.dirname(p))
+    for p in glob.glob(os.path.join(root, "packages", "*", "package.json"))
+)
+if not pkgs:
+    sys.exit(2)
+
+block = (
+    "# Copy package.json files for ALL workspace packages (patch aiws/bootstrap —\n"
+    "# régénéré depuis packages/ pour éviter les 'failed to resolve' de bun install).\n"
+    + "".join(f"COPY packages/{p}/package.json ./packages/{p}/\n" for p in pkgs)
+)
+
+# Remplace la zone : du 1er commentaire "# Copy package.json files" jusqu'à
+# (sans l'inclure) la ligne "# Copy app package.json files".
+pattern = re.compile(
+    r"# Copy package\.json files.*?(?=\n# Copy app package\.json files)",
+    re.DOTALL,
+)
+if not pattern.search(content):
+    sys.exit(0)  # structure inattendue : on ne touche pas (build tel quel)
+
+new_content = pattern.sub(block.rstrip("\n"), content, count=1)
+if new_content != content:
+    with open(dockerfile, "w") as f:
+        f.write(new_content)
+    print("patched")
+PYEOF
+    then
+        success "Dockerfile vendor/comp patché (manifests workspace complets)"
+    else
+        warn "Patch Dockerfile vendor/comp non appliqué (structure inattendue) — build tel quel"
+    fi
+fi
+
 # =============================================================================
 # ÉTAPE 4 — Réseau docker aiws
 # =============================================================================
